@@ -1019,47 +1019,67 @@
     }
 
     function createVlcShowButton(item) {
+        const isSeason = item.Type === 'Season';
+        const label = isSeason
+            ? vlcT('download_vlc_season_playlist', 'Download season as VLC playlist')
+            : vlcT('download_vlc_show_playlist', 'Download show as VLC playlist');
         const button = document.createElement('button');
         button.setAttribute('is', 'emby-button');
         button.className = 'listItem listItem-button actionSheetMenuItem emby-button download-vlc-show-button';
         button.dataset.id = 'download-vlc-show';
         button.innerHTML = `
             <span class="actionsheetMenuItemIcon listItemIcon listItemIcon-transparent material-icons" aria-hidden="true">playlist_add</span>
-            <div class="listItemBody actionsheetListItemBody"><div class="listItemBodyText actionSheetItemText">${vlcT('download_vlc_show_playlist', 'Download show as VLC playlist')}</div></div>
+            <div class="listItemBody actionsheetListItemBody"><div class="listItemBodyText actionSheetItemText">${label}</div></div>
         `;
 
         button.addEventListener('click', async (e) => {
             e.preventDefault();
             e.stopPropagation();
-            // On a Series details page the item IS the series; on a Season page use its parent.
-            const seriesId = item.Type === 'Series' ? item.Id : item.SeriesId;
-            const seriesName = (item.Type === 'Series' ? item.Name : (item.SeriesName || item.Name)) || 'show';
+            // Scope by this item: a Season returns only its own episodes; a Series
+            // (Recursive) returns every episode across all seasons.
+            const parentId = item.Id;
             try {
-                if (!seriesId) throw new Error('no series id');
+                if (!parentId) throw new Error('no item id');
                 const userId = ApiClient.getCurrentUserId();
                 if (!userId) throw new Error('no current user');
-                // Every episode in the series, across all seasons, in season->episode order.
+                // Episodes under this item, in season->episode order. SeriesName is
+                // requested so the filename and per-track titles get the show name
+                // (a Season's own payload doesn't carry SeriesName).
                 const url = ApiClient.getUrl(`/Users/${userId}/Items`, {
-                    ParentId: seriesId,
+                    ParentId: parentId,
                     IncludeItemTypes: 'Episode',
                     Recursive: true,
                     SortBy: 'ParentIndexNumber,IndexNumber',
                     SortOrder: 'Ascending',
-                    Fields: 'CanDownload'
+                    Fields: 'CanDownload,SeriesName'
                 });
                 const result = await ApiClient.ajax({ type: 'GET', url, dataType: 'json' });
                 const episodes = ((result && result.Items) || []).filter(ep => ep && ep.Id && ep.CanDownload !== false);
                 if (!episodes.length) throw new Error('no downloadable episodes');
+                const showName = (episodes[0] && episodes[0].SeriesName) || item.SeriesName || item.Name || 'show';
+                const playlistName = isSeason
+                    ? [showName, item.Name].filter(Boolean).join(' - ')
+                    : showName;
                 const tracksXml = episodes
                     .map(ep => vlcXspfTrack(buildVlcStreamUrl(ep.Id), buildVlcPlaylistTitle(ep)))
                     .join('\n');
                 const playlist = buildVlcXspfDoc(tracksXml);
-                JE.helpers.downloadTextFile(sanitizeVlcFilename(seriesName) + '.xspf', playlist, 'application/xspf+xml');
+                JE.helpers.downloadTextFile(sanitizeVlcFilename(playlistName) + '.xspf', playlist, 'application/xspf+xml');
                 closeVlcActionSheet();
-                showNotification(vlcT('download_vlc_show_success', 'Show playlist downloaded (contains your access key)'), 'success');
+                showNotification(
+                    isSeason
+                        ? vlcT('download_vlc_season_success', 'Season playlist downloaded (contains your access key)')
+                        : vlcT('download_vlc_show_success', 'Show playlist downloaded (contains your access key)'),
+                    'success'
+                );
             } catch (error) {
                 console.warn('🪼 Jellyfin Enhanced: VLC show playlist download failed', error);
-                showNotification(vlcT('download_vlc_show_error', 'Could not generate show playlist'), 'error');
+                showNotification(
+                    isSeason
+                        ? vlcT('download_vlc_season_error', 'Could not generate season playlist')
+                        : vlcT('download_vlc_show_error', 'Could not generate show playlist'),
+                    'error'
+                );
             }
         });
 
@@ -1104,8 +1124,9 @@
     };
 
     /**
-     * Adds the "Download show as VLC playlist" item to the Season or Series details
-     * "..." action sheet - a multi-track playlist of every episode in the series.
+     * Adds the multi-track VLC playlist item to the Season or Series details "..."
+     * action sheet: from a Season it downloads just that season's episodes, from a
+     * Series the whole show.
      */
     JE.addVlcShowPlaylistButton = () => {
         if (typeof JE.isDetailsPage !== 'function' || !JE.isDetailsPage()) return;
