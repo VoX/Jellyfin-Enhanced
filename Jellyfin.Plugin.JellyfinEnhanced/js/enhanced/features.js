@@ -1224,36 +1224,47 @@
             return ApiClient.getItemDownloadUrl(itemId);
         }
         // Fallback for older/newer ApiClient shapes — same URL getItemDownloadUrl builds.
-        return ApiClient.getUrl('Items/' + itemId + '/Download', { api_key: ApiClient.accessToken() });
+        return ApiClient.getUrl('Items/' + encodeURIComponent(itemId) + '/Download', { api_key: ApiClient.accessToken() });
     }
 
     // Human-friendly title for the playlist entry, e.g. "The Show - S01E02 - Pilot".
     function buildVlcPlaylistTitle(item) {
         if (item.Type === 'Episode') {
             const pad = (n) => String(n).padStart(2, '0');
-            const season = item.ParentIndexNumber != null ? pad(item.ParentIndexNumber) : null;
-            const episode = item.IndexNumber != null ? pad(item.IndexNumber) : null;
-            const code = (season != null && episode != null) ? `S${season}E${episode}` : '';
+            let code = '';
+            if (item.ParentIndexNumber != null && item.IndexNumber != null) {
+                code = `S${pad(item.ParentIndexNumber)}E${pad(item.IndexNumber)}`;
+                // Multi-episode files span a range, e.g. S01E02-E03.
+                if (item.IndexNumberEnd != null && item.IndexNumberEnd > item.IndexNumber) {
+                    code += `-E${pad(item.IndexNumberEnd)}`;
+                }
+            }
             return [item.SeriesName, code, item.Name].filter(Boolean).join(' - ');
         }
         const year = item.ProductionYear ? ` (${item.ProductionYear})` : '';
         return (item.Name || 'video') + year;
     }
 
-    // Strip characters illegal in filenames across OSes and collapse whitespace.
+    // Strip filename-illegal chars across OSes, collapse whitespace, cap length
+    // without splitting a surrogate pair, and trim leading/trailing dots/spaces
+    // (which Windows rejects).
     function sanitizeVlcFilename(name) {
-        const cleaned = String(name || 'playlist')
+        const cleaned = [...String(name || 'playlist')
             .replace(/[\/\\:*?"<>|\r\n\t]+/g, '_')
             .replace(/\s+/g, ' ')
-            .trim()
-            .slice(0, 120);
+            .trim()]
+            .slice(0, 120)
+            .join('')
+            .replace(/^[.\s]+|[.\s]+$/g, '');
         return cleaned || 'playlist';
     }
 
-    // Single-entry M3U playlist. EXTINF title must stay on one line (newlines stripped).
+    // Single-entry M3U playlist. A leading UTF-8 BOM makes players read non-ASCII
+    // titles correctly; the EXTINF title and URL are each kept to a single line.
     function buildVlcM3u(url, title) {
         const safeTitle = String(title || '').replace(/[\r\n]+/g, ' ').trim();
-        return `#EXTM3U\n#EXTINF:-1,${safeTitle}\n${url}\n`;
+        const safeUrl = String(url).replace(/[\r\n]+/g, '').trim();
+        return `\uFEFF#EXTM3U\n#EXTINF:-1,${safeTitle}\n${safeUrl}\n`;
     }
 
     function createVlcPlaylistButton(item) {
@@ -1271,16 +1282,17 @@
             e.stopPropagation();
             try {
                 const url = buildVlcStreamUrl(item.Id);
+                if (!url) throw new Error('empty stream url');
                 const title = buildVlcPlaylistTitle(item);
                 const playlist = buildVlcM3u(url, title);
                 const filename = sanitizeVlcFilename(title) + '.m3u';
                 JE.helpers.downloadTextFile(filename, playlist, 'audio/x-mpegurl');
                 showNotification(JE.t('download_vlc_playlist_success'), 'success');
+                closeOpenActionSheet(); // only on success — closing on error can hide the error toast
             } catch (error) {
                 console.warn('🪼 Jellyfin Enhanced: VLC playlist download failed', error);
                 showNotification(JE.t('download_vlc_playlist_error'), 'error');
             }
-            closeOpenActionSheet();
         });
 
         return button;
@@ -1291,41 +1303,35 @@
      * Movie/Episode details page and the item is downloadable (mirrors native gating).
      */
     JE.addVlcPlaylistButton = () => {
+        // Targeted surface: the item details page only (not card or in-player sheets).
+        if (typeof JE.isDetailsPage !== 'function' || !JE.isDetailsPage()) return;
+
         const scroller = document.querySelector('.actionSheetContent .actionSheetScroller');
         if (!scroller) return;
         if (scroller.querySelector('[data-id="download-vlc-playlist"]')) return;
-        // Per-sheet guard: the async item fetch below would otherwise race across
-        // rapid observer fires and insert duplicates. A fresh sheet = a fresh element.
-        if (scroller.dataset.jeVlcChecked === '1') return;
 
-        // Resolve the item id: details-page hash first (the targeted surface),
-        // then the continue-watching card context as a fallback.
-        let itemId = null;
-        if (typeof JE.isDetailsPage === 'function' && JE.isDetailsPage()) {
-            const query = window.location.hash.split('?')[1];
-            itemId = query ? new URLSearchParams(query).get('id') : null;
-        }
-        if (!itemId) itemId = JE.state.currentContextItemId || null;
+        const query = window.location.hash.split('?')[1];
+        const itemId = query ? new URLSearchParams(query).get('id') : null;
         if (!itemId) return;
 
-        scroller.dataset.jeVlcChecked = '1';
-
-        const userId = ApiClient.getCurrentUserId();
-        JE.helpers.getItemCached(itemId, { userId }).then((item) => {
+        JE.helpers.getItemCached(itemId).then((item) => {
             if (!item || !VLC_PLAYLIST_SUPPORTED_TYPES.includes(item.Type)) return;
-            if (!item.CanDownload) return; // native "Copy Stream URL" only appears when downloadable
-            // Re-check: the sheet may have closed (or been handled) during the await.
-            const openScroller = document.querySelector('.actionSheetContent .actionSheetScroller');
-            if (!openScroller || openScroller.querySelector('[data-id="download-vlc-playlist"]')) return;
+            // CanDownload is absent from the default item payload, so only suppress on an
+            // explicit false (matches native gating when the field is actually present).
+            if (item.CanDownload === false) return;
+            // Re-validate the SAME scroller we started from — it may have closed or been
+            // replaced (by a sheet for a different item) during the fetch. Re-querying the
+            // document here could insert into the wrong, now-open sheet.
+            if (!scroller.isConnected || scroller.querySelector('[data-id="download-vlc-playlist"]')) return;
 
             const button = createVlcPlaylistButton(item);
-            const insertionPoint = openScroller.querySelector('[data-id="copy-stream"]')
-                || openScroller.querySelector('[data-id="download"]')
-                || openScroller.querySelector('[data-id="play"]');
+            const insertionPoint = scroller.querySelector('[data-id="copy-stream"]')
+                || scroller.querySelector('[data-id="download"]')
+                || scroller.querySelector('[data-id="play"]');
             if (insertionPoint) {
                 insertionPoint.after(button);
             } else {
-                openScroller.appendChild(button);
+                scroller.appendChild(button);
             }
         }).catch((error) => {
             console.warn('🪼 Jellyfin Enhanced: addVlcPlaylistButton failed', error);
