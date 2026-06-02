@@ -891,8 +891,8 @@
 
     // ── Download as VLC playlist ──────────────────────────────────────────────
     // Adds "Download as VLC playlist" to the Movie/Episode details "..." action
-    // sheet (single stream), and "Download show as VLC playlist" to the Season
-    // "..." action sheet (a multi-track playlist of every episode in the series).
+    // sheet (single stream), and "Download show as VLC playlist" to the Season or
+    // Series "..." action sheet (a multi-track playlist of every episode in the show).
     // Each entry points at the same URL Jellyfin's native "Copy Stream URL"
     // produces (the item download URL, api_key included), so VLC streams it.
 
@@ -928,7 +928,7 @@
                     code += `-E${pad(item.IndexNumberEnd)}`;
                 }
             }
-            return [item.SeriesName, code, item.Name].filter(Boolean).join(' - ');
+            return [item.SeriesName, code, item.Name].filter(Boolean).join(' - ') || 'Episode';
         }
         const year = item.ProductionYear ? ` (${item.ProductionYear})` : '';
         return (item.Name || 'video') + year;
@@ -975,8 +975,17 @@
     // (dialogHelper dismisses via the backdrop/container), so remove the dialog
     // container directly, the same way JE's keyboard handler closes action sheets.
     function closeVlcActionSheet() {
-        document.getElementById('dialogContainer')?.remove();
-        document.getElementById('dialogBackdropContainer')?.remove();
+        // JF 10.10.7's dialogHelper uses class-only containers (no element id) and a
+        // synthetic mousedown won't dismiss it; remove the open dialog by class, covering
+        // both id-based (newer) and class-only (10.10.x) layouts.
+        const sheet = document.querySelector('.actionSheet.opened') || document.querySelector('.actionSheet');
+        const container = (sheet && sheet.closest('.dialogContainer'))
+            || document.getElementById('dialogContainer')
+            || document.querySelector('.dialogContainer');
+        if (container) container.remove();
+        const backdrop = document.getElementById('dialogBackdropContainer')
+            || document.querySelector('.dialogBackdrop');
+        if (backdrop) backdrop.remove();
     }
 
     function createVlcPlaylistButton(item) {
@@ -1009,7 +1018,7 @@
         return button;
     }
 
-    function createVlcShowButton(seasonItem) {
+    function createVlcShowButton(item) {
         const button = document.createElement('button');
         button.setAttribute('is', 'emby-button');
         button.className = 'listItem listItem-button actionSheetMenuItem emby-button download-vlc-show-button';
@@ -1022,10 +1031,11 @@
         button.addEventListener('click', async (e) => {
             e.preventDefault();
             e.stopPropagation();
-            const seriesId = seasonItem.SeriesId;
-            const seriesName = seasonItem.SeriesName || seasonItem.Name || 'show';
+            // On a Series details page the item IS the series; on a Season page use its parent.
+            const seriesId = item.Type === 'Series' ? item.Id : item.SeriesId;
+            const seriesName = (item.Type === 'Series' ? item.Name : (item.SeriesName || item.Name)) || 'show';
             try {
-                if (!seriesId) throw new Error('season has no SeriesId');
+                if (!seriesId) throw new Error('no series id');
                 const userId = ApiClient.getCurrentUserId();
                 if (!userId) throw new Error('no current user');
                 // Every episode in the series, across all seasons, in season->episode order.
@@ -1094,8 +1104,8 @@
     };
 
     /**
-     * Adds the "Download show as VLC playlist" item to the Season details "..."
-     * action sheet - a multi-track playlist of every episode in the series.
+     * Adds the "Download show as VLC playlist" item to the Season or Series details
+     * "..." action sheet - a multi-track playlist of every episode in the series.
      */
     JE.addVlcShowPlaylistButton = () => {
         if (typeof JE.isDetailsPage !== 'function' || !JE.isDetailsPage()) return;
@@ -1110,7 +1120,7 @@
 
         const userId = ApiClient.getCurrentUserId();
         ApiClient.getItem(userId, itemId).then((item) => {
-            if (!item || item.Type !== 'Season') return;
+            if (!item || (item.Type !== 'Season' && item.Type !== 'Series')) return;
             if (!scroller.isConnected || scroller.querySelector('[data-id="download-vlc-show"]')) return;
 
             const button = createVlcShowButton(item);
