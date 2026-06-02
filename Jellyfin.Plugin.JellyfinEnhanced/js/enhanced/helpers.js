@@ -431,7 +431,7 @@
 
     /**
      * Generates a text file client-side and triggers a browser download.
-     * Used e.g. to download a generated VLC/.m3u playlist.
+     * Used e.g. to download a generated VLC/.xspf playlist.
      * @param {string} filename - Suggested download filename (incl. extension).
      * @param {string} text     - File contents.
      * @param {string} [mime]   - MIME type (defaults to UTF-8 plain text).

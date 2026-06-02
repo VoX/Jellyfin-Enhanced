@@ -891,7 +891,7 @@
 
     // ── Download as VLC playlist ──────────────────────────────────────────────
     // Adds a "Download as VLC playlist" item to the item "..." action sheet on
-    // Movie/Episode details pages. Generates a single-entry .m3u pointing at the
+    // Movie/Episode details pages. Generates a single-entry .xspf playlist pointing at the
     // exact same URL Jellyfin's native "Copy Stream URL" produces (the item
     // download URL, api_key included), so opening the file streams it in VLC.
 
@@ -938,12 +938,34 @@
         return cleaned || 'playlist';
     }
 
-    // Single-entry M3U playlist. A leading UTF-8 BOM makes players read non-ASCII
-    // titles correctly; the EXTINF title and URL are each kept to a single line.
-    function buildVlcM3u(url, title) {
-        const safeTitle = String(title || '').replace(/[\r\n]+/g, ' ').trim();
-        const safeUrl = String(url).replace(/[\r\n]+/g, '').trim();
-        return `\uFEFF#EXTM3U\n#EXTINF:-1,${safeTitle}\n${safeUrl}\n`;
+    // Escape the five XML predefined entities for safe use in XSPF element text.
+    function xmlEscape(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&apos;');
+    }
+
+    // Single-entry XSPF playlist \u2014 VLC's native format. The XML header declares UTF-8
+    // (so no BOM needed); the title and URL are XML-escaped (the download URL's `&`
+    // separators must become `&amp;`). Newlines are stripped so each value stays inline.
+    function buildVlcXspf(url, title) {
+        // Strip XML-1.0-illegal control chars (they can't be escaped, only removed),
+        // then collapse newlines so each value stays on one line.
+        const t = xmlEscape(String(title || '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]+/g, '').replace(/[\r\n]+/g, ' ').trim());
+        const u = xmlEscape(String(url).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\r\n\t]+/g, '').trim());
+        return `<?xml version="1.0" encoding="UTF-8"?>
+<playlist version="1" xmlns="http://xspf.org/ns/0/">
+  <trackList>
+    <track>
+      <title>${t}</title>
+      <location>${u}</location>
+    </track>
+  </trackList>
+</playlist>
+`;
     }
 
     function createVlcPlaylistButton(item) {
@@ -963,9 +985,9 @@
                 const url = buildVlcStreamUrl(item.Id);
                 if (!url) throw new Error('empty stream url');
                 const title = buildVlcPlaylistTitle(item);
-                const playlist = buildVlcM3u(url, title);
-                const filename = sanitizeVlcFilename(title) + '.m3u';
-                JE.helpers.downloadTextFile(filename, playlist, 'audio/x-mpegurl');
+                const playlist = buildVlcXspf(url, title);
+                const filename = sanitizeVlcFilename(title) + '.xspf';
+                JE.helpers.downloadTextFile(filename, playlist, 'application/xspf+xml');
                 // Close the sheet on success. A synthetic mousedown is a no-op on JF 10.10.7
                 // (dialogHelper dismisses via the backdrop/container, not mousedown), so remove
                 // the dialog container directly — the same way JE's key handler closes sheets.
