@@ -210,6 +210,9 @@
                         console.warn('🪼 Jellyfin Enhanced: addRemoveButton not available');
                     }
                 }
+                if (typeof JE.addVlcPlaylistButton === 'function') {
+                    JE.addVlcPlaylistButton();
+                }
             }, 150),
             document.body,
             { childList: true, subtree: true }

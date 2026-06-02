@@ -429,6 +429,28 @@
         return false;
     }
 
+    /**
+     * Generates a text file client-side and triggers a browser download.
+     * Used e.g. to download a generated VLC/.m3u playlist.
+     * @param {string} filename - Suggested download filename (incl. extension).
+     * @param {string} text     - File contents.
+     * @param {string} [mime]   - MIME type (defaults to UTF-8 plain text).
+     */
+    function downloadTextFile(filename, text, mime) {
+        const blob = new Blob([text], { type: mime || 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename || 'download.txt';
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        // Defer cleanup so the download has a chance to start before the blob URL is revoked.
+        setTimeout(() => {
+            try { a.remove(); URL.revokeObjectURL(url); } catch (e) { /* already gone */ }
+        }, 1000);
+    }
+
     // Initialize on load
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', initialize);
@@ -457,6 +479,7 @@
         isElementVisible,
         addCSS,
         removeCSS,
+        downloadTextFile,
         getHandlerCount: () => handlers.length,
         getObserverCount: () => activeObservers.size
     };

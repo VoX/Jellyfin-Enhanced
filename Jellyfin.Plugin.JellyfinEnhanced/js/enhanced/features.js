@@ -889,4 +889,136 @@
         }
     };
 
+    // ── Download as VLC playlist ──────────────────────────────────────────────
+    // Adds a "Download as VLC playlist" item to the item "..." action sheet on
+    // Movie/Episode details pages. Generates a single-entry .m3u pointing at the
+    // exact same URL Jellyfin's native "Copy Stream URL" produces (the item
+    // download URL, api_key included), so opening the file streams it in VLC.
+
+    // Only leaf, downloadable types have a single playable stream.
+    const VLC_PLAYLIST_SUPPORTED_TYPES = ['Movie', 'Episode'];
+
+    // Mirrors what jellyfin-web's "Copy Stream URL" copies: the item download URL.
+    function buildVlcStreamUrl(itemId) {
+        if (typeof ApiClient.getItemDownloadUrl === 'function') {
+            return ApiClient.getItemDownloadUrl(itemId);
+        }
+        // Fallback for older/newer ApiClient shapes — same URL getItemDownloadUrl builds.
+        return ApiClient.getUrl('Items/' + encodeURIComponent(itemId) + '/Download', { api_key: ApiClient.accessToken() });
+    }
+
+    // Human-friendly title for the playlist entry, e.g. "The Show - S01E02 - Pilot".
+    function buildVlcPlaylistTitle(item) {
+        if (item.Type === 'Episode') {
+            const pad = (n) => String(n).padStart(2, '0');
+            let code = '';
+            if (item.ParentIndexNumber != null && item.IndexNumber != null) {
+                code = `S${pad(item.ParentIndexNumber)}E${pad(item.IndexNumber)}`;
+                // Multi-episode files span a range, e.g. S01E02-E03.
+                if (item.IndexNumberEnd != null && item.IndexNumberEnd > item.IndexNumber) {
+                    code += `-E${pad(item.IndexNumberEnd)}`;
+                }
+            }
+            return [item.SeriesName, code, item.Name].filter(Boolean).join(' - ');
+        }
+        const year = item.ProductionYear ? ` (${item.ProductionYear})` : '';
+        return (item.Name || 'video') + year;
+    }
+
+    // Strip filename-illegal chars across OSes, collapse whitespace, cap length
+    // without splitting a surrogate pair, and trim leading/trailing dots/spaces.
+    function sanitizeVlcFilename(name) {
+        const cleaned = [...String(name || 'playlist')
+            .replace(/[\/\\:*?"<>|\r\n\t]+/g, '_')
+            .replace(/\s+/g, ' ')
+            .trim()]
+            .slice(0, 120)
+            .join('')
+            .replace(/^[.\s]+|[.\s]+$/g, '');
+        return cleaned || 'playlist';
+    }
+
+    // Single-entry M3U playlist. A leading UTF-8 BOM makes players read non-ASCII
+    // titles correctly; the EXTINF title and URL are each kept to a single line.
+    function buildVlcM3u(url, title) {
+        const safeTitle = String(title || '').replace(/[\r\n]+/g, ' ').trim();
+        const safeUrl = String(url).replace(/[\r\n]+/g, '').trim();
+        return `\uFEFF#EXTM3U\n#EXTINF:-1,${safeTitle}\n${safeUrl}\n`;
+    }
+
+    function createVlcPlaylistButton(item) {
+        const button = document.createElement('button');
+        button.setAttribute('is', 'emby-button');
+        button.className = 'listItem listItem-button actionSheetMenuItem emby-button download-vlc-playlist-button';
+        button.dataset.id = 'download-vlc-playlist';
+        button.innerHTML = `
+            <span class="actionsheetMenuItemIcon listItemIcon listItemIcon-transparent material-icons" aria-hidden="true">playlist_play</span>
+            <div class="listItemBody actionsheetListItemBody"><div class="listItemBodyText actionSheetItemText">${JE.t('download_vlc_playlist')}</div></div>
+        `;
+
+        button.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            try {
+                const url = buildVlcStreamUrl(item.Id);
+                if (!url) throw new Error('empty stream url');
+                const title = buildVlcPlaylistTitle(item);
+                const playlist = buildVlcM3u(url, title);
+                const filename = sanitizeVlcFilename(title) + '.m3u';
+                JE.helpers.downloadTextFile(filename, playlist, 'audio/x-mpegurl');
+                // Close the sheet on success. A synthetic mousedown is a no-op on JF 10.10.7
+                // (dialogHelper dismisses via the backdrop/container, not mousedown), so remove
+                // the dialog container directly — the same way JE's key handler closes sheets.
+                document.getElementById('dialogContainer')?.remove();
+                document.getElementById('dialogBackdropContainer')?.remove();
+                showNotification(JE.t('download_vlc_playlist_success'), 'success');
+            } catch (error) {
+                console.warn('🪼 Jellyfin Enhanced: VLC playlist download failed', error);
+                showNotification(JE.t('download_vlc_playlist_error'), 'error');
+            }
+        });
+
+        return button;
+    }
+
+    /**
+     * Adds the "Download as VLC playlist" item to the open action sheet, when on a
+     * Movie/Episode details page and the item is downloadable (mirrors native gating).
+     */
+    JE.addVlcPlaylistButton = () => {
+        // Targeted surface: the item details page only (not card or in-player sheets).
+        if (typeof JE.isDetailsPage !== 'function' || !JE.isDetailsPage()) return;
+
+        const scroller = document.querySelector('.actionSheetContent .actionSheetScroller');
+        if (!scroller) return;
+        if (scroller.querySelector('[data-id="download-vlc-playlist"]')) return;
+
+        const query = window.location.hash.split('?')[1];
+        const itemId = query ? new URLSearchParams(query).get('id') : null;
+        if (!itemId) return;
+
+        const userId = ApiClient.getCurrentUserId();
+        ApiClient.getItem(userId, itemId).then((item) => {
+            if (!item || !VLC_PLAYLIST_SUPPORTED_TYPES.includes(item.Type)) return;
+            // CanDownload is absent from the default item payload, so only suppress on an
+            // explicit false (matches native gating when the field is actually present).
+            if (item.CanDownload === false) return;
+            // Re-validate the SAME scroller we started from — it may have closed or been
+            // replaced (by a sheet for a different item) during the fetch.
+            if (!scroller.isConnected || scroller.querySelector('[data-id="download-vlc-playlist"]')) return;
+
+            const button = createVlcPlaylistButton(item);
+            const insertionPoint = scroller.querySelector('[data-id="copy-stream"]')
+                || scroller.querySelector('[data-id="download"]')
+                || scroller.querySelector('[data-id="play"]');
+            if (insertionPoint) {
+                insertionPoint.after(button);
+            } else {
+                scroller.appendChild(button);
+            }
+        }).catch((error) => {
+            console.warn('🪼 Jellyfin Enhanced: addVlcPlaylistButton failed', error);
+        });
+    };
+
 })(window.JellyfinEnhanced);
