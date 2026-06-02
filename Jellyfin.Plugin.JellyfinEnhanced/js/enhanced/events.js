@@ -213,6 +213,9 @@
                 if (typeof JE.addVlcPlaylistButton === 'function') {
                     JE.addVlcPlaylistButton();
                 }
+                if (typeof JE.addVlcShowPlaylistButton === 'function') {
+                    JE.addVlcShowPlaylistButton();
+                }
             }, 150),
             document.body,
             { childList: true, subtree: true }
