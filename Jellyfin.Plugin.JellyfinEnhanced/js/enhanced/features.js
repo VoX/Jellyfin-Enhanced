@@ -1209,4 +1209,258 @@
         }
     };
 
+    // ── Download as VLC playlist ──────────────────────────────────────────────
+    // Adds "Download as VLC playlist" to the Movie/Episode details "..." action
+    // sheet (a single stream), and a multi-track playlist to the Season ("...") and
+    // Series ("...") sheets: a Season exports just that season, a Series the whole
+    // show. Each entry points at the item's download URL (api_key included) — the
+    // same URL Jellyfin's native "Download"/"Copy Stream URL" produces — so VLC
+    // streams it directly.
+
+    // Only leaf, downloadable types have a single playable stream.
+    const VLC_PLAYLIST_SUPPORTED_TYPES = ['Movie', 'Episode'];
+
+    // Builds the item's direct download URL (api_key included), same as native download.
+    function buildVlcStreamUrl(itemId) {
+        if (typeof ApiClient.getItemDownloadUrl === 'function') {
+            return ApiClient.getItemDownloadUrl(itemId);
+        }
+        // Fallback for older/newer ApiClient shapes — same URL getItemDownloadUrl builds.
+        return ApiClient.getUrl('Items/' + encodeURIComponent(itemId) + '/Download', { api_key: ApiClient.accessToken() });
+    }
+
+    // Human-friendly title for a playlist entry, e.g. "The Show - S01E02 - Pilot".
+    function buildVlcPlaylistTitle(item) {
+        if (item.Type === 'Episode') {
+            const pad = (n) => String(n).padStart(2, '0');
+            let code = '';
+            if (item.ParentIndexNumber != null && item.IndexNumber != null) {
+                code = `S${pad(item.ParentIndexNumber)}E${pad(item.IndexNumber)}`;
+                // Multi-episode files span a range, e.g. S01E02-E03.
+                if (item.IndexNumberEnd != null && item.IndexNumberEnd > item.IndexNumber) {
+                    code += `-E${pad(item.IndexNumberEnd)}`;
+                }
+            }
+            return [item.SeriesName, code, item.Name].filter(Boolean).join(' - ') || 'Episode';
+        }
+        const year = item.ProductionYear ? ` (${item.ProductionYear})` : '';
+        return (item.Name || 'video') + year;
+    }
+
+    // Strip filename-illegal chars across OSes, collapse whitespace, cap length
+    // without splitting a surrogate pair, and trim leading/trailing dots/spaces.
+    function sanitizeVlcFilename(name) {
+        const cleaned = [...String(name || 'playlist')
+            .replace(/[\/\\:*?"<>|\r\n\t]+/g, '_')
+            .replace(/\s+/g, ' ')
+            .trim()]
+            .slice(0, 120)
+            .join('')
+            .replace(/^[.\s]+|[.\s]+$/g, '');
+        return cleaned || 'playlist';
+    }
+
+    // Escape the five XML predefined entities for safe use in XSPF element text.
+    function xmlEscape(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&apos;');
+    }
+
+    // One XSPF <track>. Strips XML-1.0-illegal control chars (cannot be escaped,
+    // only removed) and newlines, then XML-escapes (the URL's & becomes &amp;).
+    function vlcXspfTrack(url, title) {
+        const t = xmlEscape(String(title || '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]+/g, '').replace(/[\r\n]+/g, ' ').trim());
+        const u = xmlEscape(String(url).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\r\n\t]+/g, '').trim());
+        return `    <track>\n      <title>${t}</title>\n      <location>${u}</location>\n    </track>`;
+    }
+
+    // Wrap one or more <track> blocks into an XSPF document (VLC's native format).
+    // The XML header declares UTF-8, so no BOM is needed.
+    function buildVlcXspfDoc(tracksXml) {
+        return `<?xml version="1.0" encoding="UTF-8"?>\n<playlist version="1" xmlns="http://xspf.org/ns/0/">\n  <trackList>\n${tracksXml}\n  </trackList>\n</playlist>\n`;
+    }
+
+    function createVlcPlaylistButton(item) {
+        const button = document.createElement('button');
+        button.setAttribute('is', 'emby-button');
+        button.className = 'listItem listItem-button actionSheetMenuItem emby-button download-vlc-playlist-button';
+        button.dataset.id = 'download-vlc-playlist';
+        button.innerHTML = `
+            <span class="actionsheetMenuItemIcon listItemIcon listItemIcon-transparent material-icons" aria-hidden="true">playlist_play</span>
+            <div class="listItemBody actionsheetListItemBody"><div class="listItemBodyText actionSheetItemText">${JE.t('download_vlc_playlist')}</div></div>
+        `;
+
+        button.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            try {
+                const url = buildVlcStreamUrl(item.Id);
+                if (!url) throw new Error('empty stream url');
+                const title = buildVlcPlaylistTitle(item);
+                const playlist = buildVlcXspfDoc(vlcXspfTrack(url, title));
+                JE.helpers.downloadTextFile(sanitizeVlcFilename(title) + '.xspf', playlist, 'application/xspf+xml');
+                closeOpenActionSheet();
+                showNotification(JE.t('download_vlc_playlist_success'), 'success');
+            } catch (error) {
+                console.warn('🪼 Jellyfin Enhanced: VLC playlist download failed', error);
+                showNotification(JE.t('download_vlc_playlist_error'), 'error');
+            }
+        });
+
+        return button;
+    }
+
+    function createVlcShowButton(item) {
+        const isSeason = item.Type === 'Season';
+        const label = isSeason
+            ? JE.t('download_vlc_season_playlist')
+            : JE.t('download_vlc_show_playlist');
+        const button = document.createElement('button');
+        button.setAttribute('is', 'emby-button');
+        button.className = 'listItem listItem-button actionSheetMenuItem emby-button download-vlc-show-button';
+        button.dataset.id = 'download-vlc-show';
+        button.innerHTML = `
+            <span class="actionsheetMenuItemIcon listItemIcon listItemIcon-transparent material-icons" aria-hidden="true">playlist_add</span>
+            <div class="listItemBody actionsheetListItemBody"><div class="listItemBodyText actionSheetItemText">${label}</div></div>
+        `;
+
+        button.addEventListener('click', async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            // Scope by this item: a Season returns only its own episodes; a Series
+            // (Recursive) returns every episode across all seasons.
+            const parentId = item.Id;
+            try {
+                if (!parentId) throw new Error('no item id');
+                const userId = ApiClient.getCurrentUserId();
+                if (!userId) throw new Error('no current user');
+                // Episodes under this item, in season→episode order. SeriesName is
+                // requested so the filename and per-track titles get the show name
+                // (a Season's own payload doesn't carry SeriesName).
+                const url = ApiClient.getUrl(`/Users/${userId}/Items`, {
+                    ParentId: parentId,
+                    IncludeItemTypes: 'Episode',
+                    Recursive: true,
+                    SortBy: 'ParentIndexNumber,IndexNumber',
+                    SortOrder: 'Ascending',
+                    Fields: 'CanDownload,SeriesName'
+                });
+                const result = await ApiClient.ajax({ type: 'GET', url, dataType: 'json' });
+                const episodes = ((result && result.Items) || []).filter(ep => ep && ep.Id && ep.CanDownload !== false);
+                if (!episodes.length) throw new Error('no downloadable episodes');
+                const showName = (episodes[0] && episodes[0].SeriesName) || item.SeriesName || item.Name || 'show';
+                const playlistName = isSeason
+                    ? [showName, item.Name].filter(Boolean).join(' - ')
+                    : showName;
+                const tracksXml = episodes
+                    .map(ep => vlcXspfTrack(buildVlcStreamUrl(ep.Id), buildVlcPlaylistTitle(ep)))
+                    .join('\n');
+                const playlist = buildVlcXspfDoc(tracksXml);
+                JE.helpers.downloadTextFile(sanitizeVlcFilename(playlistName) + '.xspf', playlist, 'application/xspf+xml');
+                closeOpenActionSheet();
+                showNotification(
+                    isSeason
+                        ? JE.t('download_vlc_season_success')
+                        : JE.t('download_vlc_show_success'),
+                    'success'
+                );
+            } catch (error) {
+                console.warn('🪼 Jellyfin Enhanced: VLC show playlist download failed', error);
+                showNotification(
+                    isSeason
+                        ? JE.t('download_vlc_season_error')
+                        : JE.t('download_vlc_show_error'),
+                    'error'
+                );
+            }
+        });
+
+        return button;
+    }
+
+    /**
+     * Adds the single-stream "Download as VLC playlist" item to the Movie/Episode
+     * details "..." action sheet (only when the item is downloadable).
+     */
+    JE.addVlcPlaylistButton = () => {
+        if (typeof JE.isDetailsPage !== 'function' || !JE.isDetailsPage()) return;
+
+        const scroller = document.querySelector('.actionSheetContent .actionSheetScroller');
+        if (!scroller) return;
+        if (scroller.querySelector('[data-id="download-vlc-playlist"]')) return;
+
+        const query = window.location.hash.split('?')[1];
+        const itemId = query ? new URLSearchParams(query).get('id') : null;
+        if (!itemId) return;
+
+        const userId = ApiClient.getCurrentUserId();
+        const itemPromise = JE.helpers?.getItemCached
+            ? JE.helpers.getItemCached(itemId, { userId })
+            : ApiClient.getItem(userId, itemId);
+        itemPromise.then((item) => {
+            if (!item || !VLC_PLAYLIST_SUPPORTED_TYPES.includes(item.Type)) return;
+            // CanDownload is absent from the default item payload, so only suppress on an
+            // explicit false (matches native gating when the field is actually present).
+            if (item.CanDownload === false) return;
+            if (!scroller.isConnected || scroller.querySelector('[data-id="download-vlc-playlist"]')) return;
+
+            const button = createVlcPlaylistButton(item);
+            const insertionPoint = scroller.querySelector('[data-id="copy-stream"]')
+                || scroller.querySelector('[data-id="download"]')
+                || scroller.querySelector('[data-id="resume"]')
+                || scroller.querySelector('[data-id="play"]');
+            if (insertionPoint) {
+                insertionPoint.after(button);
+            } else {
+                scroller.appendChild(button);
+            }
+        }).catch((error) => {
+            console.warn('🪼 Jellyfin Enhanced: addVlcPlaylistButton failed', error);
+        });
+    };
+
+    /**
+     * Adds the multi-track VLC playlist item to the Season or Series details "..."
+     * action sheet: from a Season it downloads just that season's episodes, from a
+     * Series the whole show.
+     */
+    JE.addVlcShowPlaylistButton = () => {
+        if (typeof JE.isDetailsPage !== 'function' || !JE.isDetailsPage()) return;
+
+        const scroller = document.querySelector('.actionSheetContent .actionSheetScroller');
+        if (!scroller) return;
+        if (scroller.querySelector('[data-id="download-vlc-show"]')) return;
+
+        const query = window.location.hash.split('?')[1];
+        const itemId = query ? new URLSearchParams(query).get('id') : null;
+        if (!itemId) return;
+
+        const userId = ApiClient.getCurrentUserId();
+        const itemPromise = JE.helpers?.getItemCached
+            ? JE.helpers.getItemCached(itemId, { userId })
+            : ApiClient.getItem(userId, itemId);
+        itemPromise.then((item) => {
+            if (!item || (item.Type !== 'Season' && item.Type !== 'Series')) return;
+            if (!scroller.isConnected || scroller.querySelector('[data-id="download-vlc-show"]')) return;
+
+            const button = createVlcShowButton(item);
+            const insertionPoint = scroller.querySelector('[data-id="downloadall"]')
+                || scroller.querySelector('[data-id="download"]')
+                || scroller.querySelector('[data-id="resume"]')
+                || scroller.querySelector('[data-id="play"]');
+            if (insertionPoint) {
+                insertionPoint.after(button);
+            } else {
+                scroller.appendChild(button);
+            }
+        }).catch((error) => {
+            console.warn('🪼 Jellyfin Enhanced: addVlcShowPlaylistButton failed', error);
+        });
+    };
+
+
 })(window.JellyfinEnhanced);

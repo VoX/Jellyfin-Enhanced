@@ -674,11 +674,33 @@
         return a;
     }
 
+    /**
+     * Triggers a client-side download of a text file (e.g. a generated playlist).
+     * @param {string} filename The download filename.
+     * @param {string} text The file contents.
+     * @param {string} [mime] The MIME type (defaults to text/plain).
+     */
+    function downloadTextFile(filename, text, mime) {
+        const blob = new Blob([text], { type: mime || 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename || 'download.txt';
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        // Defer cleanup so the download has a chance to start before the blob URL is revoked.
+        setTimeout(() => {
+            try { a.remove(); URL.revokeObjectURL(url); } catch (e) { /* already gone */ }
+        }, 1000);
+    }
+
     // Expose helpers
     JE.helpers = {
         onViewPage,
         onNavigate,
         getItemCached,
+        downloadTextFile,
         getCurrentView,
         createObserver,
         onBodyMutation,

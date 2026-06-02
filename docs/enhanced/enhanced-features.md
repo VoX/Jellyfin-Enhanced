@@ -228,6 +228,19 @@ Fine-tune subtitle appearance with presets and custom colors.
    - Preview changes live
 5. Changes apply immediately
 
+### Download as VLC Playlist
+
+Export Jellyfin streams as an [XSPF](https://www.xspf.org/) playlist (VLC's native format) right from the details page **"..."** menu, then open them in VLC.
+
+- **Movies & Episodes** - "Download as VLC playlist" saves a single-stream `.xspf`, placed next to the native Copy Stream URL / Download.
+- **Seasons** - "Download season as VLC playlist" saves every episode in that season.
+- **Series** - "Download show as VLC playlist" saves every episode across all seasons, in season → episode order.
+
+Each playlist entry points at the item's authenticated download URL, so VLC streams it directly — no extra configuration required.
+
+!!! note
+    The generated `.xspf` embeds your personal access key (it lives inside the stream URLs). Treat the file like a credential and avoid sharing it.
+
 ---
 
 ## Discovery & Integration

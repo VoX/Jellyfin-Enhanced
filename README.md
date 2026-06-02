@@ -66,6 +66,7 @@ For detailed installation instructions and troubleshooting, see the [Installatio
 - **Custom Pause Screen** - Beautiful overlay with media info
 - **Auto-Skip Intros/Outros** - Seamless binge-watching (requires Intro Skipper plugin)
 - **Custom Subtitle Colors** - Full color customization with alpha support
+- **Download as VLC Playlist** - Export a movie/episode stream, a whole season, or an entire show as an XSPF playlist to open in VLC
 
 ### 🙈 Content Management
 - **Hidden Content System** - Per-user content hiding with server-side storage
